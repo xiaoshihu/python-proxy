@@ -24,6 +24,7 @@ setup(
     python_requires     = '>=3.6',
     keywords            = find_value('keywords'),
     packages            = ['pproxy'],
+    # 应该就是一些说明
     classifiers         = [
         'Development Status :: 5 - Production/Stable',
         'Environment :: Console',
@@ -44,6 +45,7 @@ setup(
         ],
     },
     install_requires    = [],
+    # 就像注册了一个快捷命令一样，指定执行的方法
     entry_points        = {
         'console_scripts': [
             'pproxy = pproxy.server:main',
