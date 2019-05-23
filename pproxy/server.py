@@ -1,10 +1,20 @@
-import argparse, time, re, asyncio, functools, base64, random, urllib.parse, socket
+import argparse
+import asyncio
+import base64
+import functools
+import random
+import re
+import socket
+import time
+import urllib.parse
+
 from . import proto
 from .__doc__ import *
 
 SOCKET_TIMEOUT = 300
 PACKET_SIZE = 65536
 UDP_LIMIT = 30
+# ？？？这在干啥
 DUMMY = lambda s: s
 
 asyncio.StreamReader.read_ = lambda self: self.read(PACKET_SIZE)
@@ -60,6 +70,9 @@ def schedule(rserver, salgorithm, host_name):
 
 async def stream_handler(reader, writer, unix, lbind, protos, rserver, cipher, authtime=86400 * 30, block=None,
                          salgorithm='fa', verbose=DUMMY, modstat=lambda r, h: lambda i: DUMMY, **kwargs):
+    # 开启服务之后，会立即到这个协程函数里面来，参数也会自己传递过来
+    # TODO: 2019/5/23 有网络请求被捕捉之后，就会到这个处理函数，其实还有有很多的细节被隐藏了，比如套接字的很多底层的东西
+    # TODO: 2019/5/23 但是，这样异步的写法确实比回调要好一些
     try:
         if unix:
             remote_ip, server_ip, remote_text = 'local', None, 'unix_local'
@@ -106,6 +119,9 @@ async def stream_handler(reader, writer, unix, lbind, protos, rserver, cipher, a
             pass
 
 
+# 我现在在考虑的是，到底有没有什么必要将参数变得这么复杂，各种匿名函数加上可变参数，这种匿名函数里面夹杂匿名函数的东西是啥玩意
+# 或者说是作者的恶趣味？
+# 参数好像传递过来了
 async def reuse_stream_handler(reader, writer, unix, lbind, protos, rserver, urserver, block, cipher, salgorithm,
                                verbose=DUMMY, modstat=lambda r, h: lambda i: DUMMY, **kwargs):
     try:
@@ -279,6 +295,7 @@ class BackwardConnection(object):
 
 class ProxyURI(object):
     def __init__(self, **kw):
+        # 这样写会导致一个问题，你不知道有哪些变量？跟js一样很差的感觉，**kw能不用就不用
         self.__dict__.update(kw)
         self.total = 0
         self.udpmap = {}
@@ -441,12 +458,25 @@ class ProxyURI(object):
         return reader_remote, writer_remote
 
     def start_server(self, args):
+        # 说真的，看到这样的代码我头都是大的
+        # 首先我们来看一下这个函数的作用，简单的来说，就是把参数绑定到一个方法，第一个参数就是方法对象，后面就是绑定的参数
+        # 看到这种python代码真的是灾难我不知道写这个代码的人在想什么
+        # TODO: 2019/5/23 很好的反面教材
+        # 将对象的属性变成字典
+        x = vars(self)
+        # 下面这个函数其实是一个协程函数
+        # 现在我不清楚，都给这个函数绑定了什么参数
         handler = functools.partial(reuse_stream_handler if self.reuse else stream_handler, **vars(self), **args)
+        # y = handler()
         if self.backward:
             return self.backward.start_server(handler)
         elif self.unix:
             return asyncio.start_unix_server(handler, path=self.bind, ssl=self.sslserver)
         else:
+            # 第一个参数是一个回调函数，可以是一个协程函数，如果是一个协程函数的话，会将这个协程函数添加到协程任务里面，就能立刻执行了
+            # 对这个协程函数还是有一定要求的，需要接受两个参数，两个参数的类型是：instances of the StreamReader and StreamWriter classes
+            # 其他的参数都传递到哪去了？这个的作用是开启套接字服务，也就是说，不仅仅是http服务，还是没有看到write和read流在哪里
+            # 想明白了，这两个流服务会自己传递过去。
             return asyncio.start_server(handler, host=self.host_name, port=self.port, ssl=self.sslserver,
                                         reuse_port=args.get('ruport'))
 
@@ -471,9 +501,11 @@ class ProxyURI(object):
             return re.compile(
                 '(:?' + ''.join('|'.join(i.strip() for i in f if i.strip() and not i.startswith('#'))) + ')$').match
 
+    # 工厂函数？
     @classmethod
     def compile_relay(cls, uri):
         tail = cls.DIRECT
+        # 对输入进来的参数进行处理，因为输入的参数总是有不同的
         for urip in reversed(uri.split('__')):
             tail = cls.compile(urip, tail)
         return tail
@@ -536,6 +568,7 @@ class ProxyURI(object):
                         ssh='ssh' in rawprotos, relay=relay)
 
 
+# 这个位置相当于是给类添加了一个静态变量，但是，这种写法好？会导致在程序里面没法追踪，为什么要这样写？
 ProxyURI.DIRECT = ProxyURI(direct=True, tunnel=False, reuse=False, relay=None, alive=True, match=None, cipher=None,
                            backward=None, ssh=None, lbind=None)
 
@@ -605,8 +638,10 @@ def main():
         return
     # 这里如果我没有传递参数进来，就会解析后面这段字符串，并且，添加到参数里面，看看解析成什么样子了
     if not args.listen and not args.ulisten:
+        # 在这个参数里面添加了一个代理对象，为什么要添加到这个参数中？为了后面所有处理模式的统一？
         args.listen.append(ProxyURI.compile_relay('http+socks4+socks5://:8080/'))
 
+    # 可以自己往里面添加
     args.httpget = {}
     if args.pac:
         pactext = 'function FindProxyForURL(u,h){' + (
@@ -630,6 +665,8 @@ def main():
     elif any(map(lambda o: o.sslclient, args.listen)):
         print('You must specify --ssl to listen in ssl mode')
         return
+
+    # 获取异步循环事件
     loop = asyncio.get_event_loop()
     if args.v:
         from . import verbose
@@ -641,6 +678,8 @@ def main():
               '({}{})'.format(option.cipher.name, ' ' + ','.join(i.name() for i in
                                                                  option.cipher.plugins) if option.cipher and option.cipher.plugins else '') if option.cipher else '')
         try:
+            # 异步库还是需要好好学习
+            # 这个函数接受的参数是一个协程对象
             server = loop.run_until_complete(option.start_server(vars(args)))
             servers.append(server)
         except Exception as ex:
