@@ -7,16 +7,30 @@ import re
 import socket
 import time
 import urllib.parse
+import traceback
 
 from . import proto
 from .__doc__ import *
-
+NUM = 0
 SOCKET_TIMEOUT = 300
 PACKET_SIZE = 65536
 UDP_LIMIT = 30
+'''
+    本来别人是需要两个代理的，一个是代理服务器，一个是代理服务器，因为在这里面是可以发送加密请求的，所以，客户端会接受本机发出的请求
+    然后对其的http请求进行加密，应该是全部都加密了（包括头部），然后，服务端接受到请求之后，对客户端发送过来的加密请求进行解密，并且
+    两个应该都配置好了相同的影响因子，所以，在外面拦截获取之后基本上是不能进行解密的。所以说其实我现在的做法仅仅就是当作最简单的代理
+    服务器在使用，整个流程大概是这个样子的：
+    1.开启代理服务器，指定代理的流量ip和端口；
+    2.利用selenium设置浏览器的代理，将所有的流量发送到这个代理服务器；
+    3.浏览器发送请求之后，请求被代理服务器接受，就与代理服务器建立了连接，生成了read和write流；
+    4.代理服务器对请求进行处理之后，确定目标地址，然后与目标地址建立连接，生成了远程read和writer流；
+    5.然后代理服务器将远程的read中的内容写入到本地writer流里面，并将本地read流的内容写入到远程writer里面；
+    6.第5步骤就实现了流量的传递，现在存在的问题是，http请求或者说底层套接字传递的细节我现在不清楚，并且，有时候访问一个链接不仅仅只发送了一个请求
+'''
 # ？？？这在干啥
 DUMMY = lambda s: s
 
+# TODO: 2019/5/24 需要重复使用就定义三个完整的函数不好？
 asyncio.StreamReader.read_ = lambda self: self.read(PACKET_SIZE)
 asyncio.StreamReader.read_n = lambda self, n: asyncio.wait_for(self.readexactly(n), timeout=SOCKET_TIMEOUT)
 asyncio.StreamReader.read_until = lambda self, s: asyncio.wait_for(self.readuntil(s), timeout=SOCKET_TIMEOUT)
@@ -67,7 +81,7 @@ def schedule(rserver, salgorithm, host_name):
     else:
         raise Exception('Unknown scheduling algorithm')  # Unreachable
 
-
+# TODO: 2019/5/24 读取read里面的内容应该就能知道发送过来的请求是什么了
 async def stream_handler(reader, writer, unix, lbind, protos, rserver, cipher, authtime=86400 * 30, block=None,
                          salgorithm='fa', verbose=DUMMY, modstat=lambda r, h: lambda i: DUMMY, **kwargs):
     # 开启服务之后，会立即到这个协程函数里面来，参数也会自己传递过来
@@ -77,11 +91,20 @@ async def stream_handler(reader, writer, unix, lbind, protos, rserver, cipher, a
         if unix:
             remote_ip, server_ip, remote_text = 'local', None, 'unix_local'
         else:
+            # con = await reader.read()
+            # print(con.decode('utf8').rstrip())
+            global NUM
+            print(NUM)
+            NUM+=1
+            # TODO: 2019/5/24 其实这里也监听不到了，我觉得，这个代理服务器起到最主要的作用是在两个地址中建立了tcp链接，也就是，只有tcp链接的时候
+            # TODO: 2019/5/24 因为gfw的现在的手段就是tcp阻断，所以，有可能这个不能实现我想要实现的功能。
             remote_ip, remote_port, *_ = writer.get_extra_info('peername')
             server_ip = writer.get_extra_info('sockname')[0]
             remote_text = f'{remote_ip}:{remote_port}'
         local_addr = None if server_ip in ('127.0.0.1', '::1', None) else (server_ip, 0)
         reader_cipher, _ = await prepare_ciphers(cipher, reader, writer, server_side=False)
+        # TODO: 2019/5/24 现在觉得这个工具是不是太底层了一点。
+        # TODO: 2019/5/24 这个会一直触发异常
         lproto, host_name, port, initbuf = await proto.parse(protos, reader=reader, writer=writer,
                                                              authtable=AuthTable(remote_ip, authtime),
                                                              reader_cipher=reader_cipher,
@@ -96,10 +119,12 @@ async def stream_handler(reader, writer, unix, lbind, protos, rserver, cipher, a
             roption = schedule(rserver, salgorithm, host_name) or ProxyURI.DIRECT
             verbose(f'{lproto.name} {remote_text}{roption.logtext(host_name, port)}')
             try:
+                # TODO: 2019/5/24 与远程目标建立连接。这两个流的实例还需要好好的看一下
                 reader_remote, writer_remote = await roption.open_connection(host_name, port, local_addr, lbind)
             except asyncio.TimeoutError:
                 raise Exception(f'Connection timeout {roption.bind}')
             try:
+                # TODO: 2019/5/24 对流进行处理
                 reader_remote, writer_remote = await roption.prepare_connection(reader_remote, writer_remote, host_name,
                                                                                 port)
                 writer_remote.write(initbuf)
@@ -108,10 +133,16 @@ async def stream_handler(reader, writer, unix, lbind, protos, rserver, cipher, a
                 raise Exception('Unknown remote protocol')
             m = modstat(remote_ip, host_name)
             lchannel = lproto.http_channel if initbuf else lproto.channel
+
+            # TODO: 2019/5/24 会立即执行协程对象。
+            # TODO: 2019/5/24 有一个问题，有可能是长连接，导致这里好像监听不到一样，但是，我可以看到在代理服务器关闭之后，xhr链接都会断开
             asyncio.ensure_future(lproto.channel(reader_remote, writer, m(2 + roption.direct), m(4 + roption.direct)))
             asyncio.ensure_future(lchannel(reader, writer_remote, m(roption.direct), roption.connection_change))
+
     except Exception as ex:
+        print(traceback.format_exc())
         if not isinstance(ex, asyncio.TimeoutError) and not str(ex).startswith('Connection closed'):
+            # TODO: 2019/5/24 有可能出现异常之后，这个变量有可能还没有被定义
             verbose(f'{str(ex) or "Unsupported protocol"} from {remote_ip}')
         try:
             writer.close()

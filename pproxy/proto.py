@@ -28,6 +28,7 @@ def socks_address(reader, n):
 class BaseProtocol:
     def __init__(self, param):
         self.param = param
+        self.num = 0
     @property
     def name(self):
         return self.__class__.__name__.lower()
@@ -43,7 +44,11 @@ class BaseProtocol:
         return data
     async def connect(self, reader_remote, writer_remote, rauth, host_name, port, **kw):
         raise Exception(f'{self.name} don\'t support client')
+
     async def channel(self, reader, writer, stat_bytes, stat_conn):
+        # TODO: 2019/5/24 估计不是所有的链接都会通过这里
+        # print(self.num)
+        # self.num +=1
         try:
             stat_conn(1)
             while True:
